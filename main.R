@@ -4,14 +4,16 @@ library(moments)
 library(ggplot2)
 library(tidyquant)
 library(dplyr)
-library(tidyr)  
+library(tidyr)
+library(nloptr)
 
 # Load data
-tickers <- c("GLD", "SLV", "USO", "UNG", "CORN", "WEAT", "JO", "SOYB", "COW")
-data <- tq_get(tickers, from = "2022-01-01", to = Sys.Date(), get = "stock.prices")
+tickers <- c("GLD", "SLV",     # Precious Metals
+             "USO", "UNG",     # Energy
+             "CORN", "WEAT",   # Agriculture
+             "JO", "SOYB", "DBA")  
 
-available_symbols <- unique(data$symbol)
-cat("Successfully downloaded data for:", paste(available_symbols, collapse = ", "), "\n")
+data <- tq_get(tickers, from = "2022-01-01", to = Sys.Date(), get = "stock.prices")
 
 returns <- data %>%
   group_by(symbol) %>%
@@ -19,62 +21,133 @@ returns <- data %>%
                mutate_fun = dailyReturn,
                col_rename = "daily_return") %>%
   pivot_wider(names_from = symbol, values_from = daily_return) %>%
-  na.omit()  # Removes dates with missing values
+  na.omit()
 
-# Convert returns to matrix for calculations
-returns_matrix <- as.matrix(returns %>% select(-date))  # Exclude date column
+# Drop any columns with remaining NA values
+returns <- returns %>% select(where(~ sum(is.na(.)) == 0))
 
-# Calculate mean, variance, skewness, kurtosis
+returns_matrix <- as.matrix(returns %>% select(-date))
+
+# Parameters
+lambda <- 3
+gamma <- 1
+delta_kurtosis <- 1
+gamma_power <- 3
+
+# Stats
 mean_returns <- colMeans(returns_matrix)
-variance_returns <- apply(returns_matrix, 2, var)
+cov_matrix <- cov(returns_matrix)
 skewness_values <- apply(returns_matrix, 2, skewness)
 kurtosis_values <- apply(returns_matrix, 2, kurtosis)
+n_assets <- ncol(returns_matrix)
 
-# Define risk aversion and skewness preference parameters
-lambda <- 3  # Risk aversion
-gamma <- 1   # Skewness preference
-delta_kurtosis <- 1  # Kurtosis preference
-gamma_power <- 3  # Risk aversion for power utility (lognormal)
+### 1. 2-Moment Utility Portfolio (Mean-Variance Optimal)
+Dmat <- 2 * cov_matrix
+dvec <- mean_returns
+Amat <- cbind(rep(1, n_assets), diag(n_assets))
+bvec <- c(1, rep(0, n_assets))  # weights sum to 1, no short sales
 
-# Define a function to calculate utility
-calculate_utility <- function(mean, variance, skewness = NULL, kurtosis = NULL, utility_type = "2-moment") {
-  if (utility_type == "2-moment") {
-    return(mean - (lambda / 2) * variance)
-  } else if (utility_type == "3-moment") {
-    return(mean - (lambda / 2) * variance + (gamma / 6) * skewness)
-  } else if (utility_type == "power") {
-    return(mean / (1 - gamma_power) - (gamma_power / 2) * variance)
-  } else if (utility_type == "4-moment") {
-    return(mean - (lambda / 2) * variance + (gamma / 6) * skewness - (delta_kurtosis / 24) * kurtosis)
-  }
+opt_2 <- solve.QP(Dmat, dvec, Amat, bvec, meq = 1)
+weights_2 <- round(opt_2$solution, 4)
+
+### 2. Power Utility under Lognormal
+utility_power_fn <- function(w, mu, sigma, gamma) {
+  port_mean <- as.numeric(t(w) %*% mu)
+  port_var <- as.numeric(t(w) %*% sigma %*% w)
+  - (port_mean / (1 - gamma) - (gamma / 2) * port_var)
 }
 
-# Calculate utilities for all types
-utility_2_moment <- calculate_utility(mean_returns, variance_returns, utility_type = "2-moment")
-utility_3_moment <- calculate_utility(mean_returns, variance_returns, skewness_values, utility_type = "3-moment")
-utility_power <- calculate_utility(mean_returns, variance_returns, utility_type = "power")
-utility_4_moment <- calculate_utility(mean_returns, variance_returns, skewness_values, kurtosis_values, utility_type = "4-moment")
+opt_power <- nloptr(
+  x0 = rep(1/n_assets, n_assets),
+  eval_f = function(w) utility_power_fn(w, mean_returns, cov_matrix, gamma_power),
+  eval_grad_f = function(w) nl.grad(w, function(w) utility_power_fn(w, mean_returns, cov_matrix, gamma_power)),
+  lb = rep(0, n_assets),
+  ub = rep(1, n_assets),
+  eval_g_eq = function(w) sum(w) - 1,
+  eval_jac_g_eq = function(w) rep(1, n_assets),
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1.0e-8)
+)
+weights_power <- round(opt_power$solution, 4)
 
-# Data frame for comparison
-utilities_comparison_all <- data.frame(
-  Symbol = colnames(returns_matrix),
-  Utility_2_Moment = utility_2_moment,
-  Utility_3_Moment = utility_3_moment,
-  Utility_Power = utility_power,
-  Utility_4_Moment = utility_4_moment
+### 3. 3-Moment Utility (adds Skewness)
+utility_3_fn <- function(w, mu, sigma, skew, lambda, gamma) {
+  - (t(w) %*% mu - (lambda / 2) * t(w) %*% sigma %*% w + (gamma / 6) * sum((w^3) * skew))
+}
+
+opt_3 <- nloptr(
+  x0 = rep(1/n_assets, n_assets),
+  eval_f = function(w) utility_3_fn(w, mean_returns, cov_matrix, skewness_values, lambda, gamma),
+  eval_grad_f = function(w) nl.grad(w, function(w) utility_3_fn(w, mean_returns, cov_matrix, skewness_values, lambda, gamma)),
+  lb = rep(0, n_assets),
+  ub = rep(1, n_assets),
+  eval_g_eq = function(w) sum(w) - 1,
+  eval_jac_g_eq = function(w) rep(1, n_assets),
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1.0e-8)
+)
+weights_3 <- round(opt_3$solution, 4)
+
+### 4. 4-Moment Utility (adds Kurtosis)
+utility_4_fn <- function(w, mu, sigma, skew, kurt, lambda, gamma, delta) {
+  - (t(w) %*% mu - (lambda / 2) * t(w) %*% sigma %*% w +
+       (gamma / 6) * sum((w^3) * skew) -
+       (delta / 24) * sum((w^4) * kurt))
+}
+
+opt_4 <- nloptr(
+  x0 = rep(1/n_assets, n_assets),
+  eval_f = function(w) utility_4_fn(w, mean_returns, cov_matrix, skewness_values, kurtosis_values, lambda, gamma, delta_kurtosis),
+  eval_grad_f = function(w) nl.grad(w, function(w) utility_4_fn(w, mean_returns, cov_matrix, skewness_values, kurtosis_values, lambda, gamma, delta_kurtosis)),
+  lb = rep(0, n_assets),
+  ub = rep(1, n_assets),
+  eval_g_eq = function(w) sum(w) - 1,
+  eval_jac_g_eq = function(w) rep(1, n_assets),
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1.0e-8)
+)
+weights_4 <- round(opt_4$solution, 4)
+
+### Compare
+comparison_df <- data.frame(
+  Asset = colnames(returns_matrix),
+  `2-Moment` = weights_2,
+  `Power Utility` = weights_power,
+  `3-Moment` = weights_3,
+  `4-Moment` = weights_4
 )
 
-# Print comparison
-print(utilities_comparison_all)
+print(comparison_df)
 
-# Plot comparison
-utilities_comparison_all_long <- utilities_comparison_all %>%
-  pivot_longer(cols = starts_with("Utility"), names_to = "Utility_Type", values_to = "Utility_Value")
+### Plot Comparison
+comparison_long <- pivot_longer(comparison_df, cols = -Asset, names_to = "Model", values_to = "Weight")
 
-ggplot(utilities_comparison_all_long, aes(x = Symbol, y = Utility_Value, fill = Utility_Type)) +
+ggplot(comparison_long, aes(x = Asset, y = Weight, fill = Model)) +
   geom_bar(stat = "identity", position = "dodge") +
-  labs(title = "Comparison of Different Utility Functions",
-       x = "Asset",
-       y = "Utility Value") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Portfolio Weights Across Utility Models") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+weight_change_df <- data.frame(
+  Asset = colnames(returns_matrix),
+  Skewness = round(skewness_values, 3),
+  `Δ3-Moment vs 2-Moment` = weights_3 - weights_2,
+  `Δ4-Moment vs 2-Moment` = weights_4 - weights_2
+)
+
+# Convert to long format for plotting
+weight_change_long <- pivot_longer(
+  weight_change_df,
+  cols = starts_with("Δ"),
+  names_to = "Model_Comparison",
+  values_to = "Weight_Change"
+)
+
+# Plot Skewness vs. Change in Weight
+ggplot(weight_change_long, aes(x = Skewness, y = Weight_Change, label = Asset)) +
+  geom_point(aes(color = Model_Comparison), size = 3) +
+  geom_text(vjust = -0.8, size = 3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
+  labs(title = "Impact of Skewness on Portfolio Weights",
+       subtitle = "Change in Allocation vs. 2-Moment Model",
+       x = "Skewness of Asset",
+       y = "Change in Weight",
+       color = "Model Comparison") +
   theme_minimal()
