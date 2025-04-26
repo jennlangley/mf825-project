@@ -1,153 +1,261 @@
 # Load libraries
 library(quadprog)
-library(moments)
-library(ggplot2)
-library(tidyquant)
-library(dplyr)
-library(tidyr)
 library(nloptr)
+library(moments)
+library(tseries)
+library(ggplot2)
+library(reshape2)
 
 # Load data
-tickers <- c("GLD", "SLV",     # Precious Metals
-             "USO", "UNG",     # Energy
-             "CORN", "WEAT",   # Agriculture
-             "JO", "SOYB", "DBA")  
+data <- read.csv('./hedge_fund_data_monthly.csv')
 
-data <- tq_get(tickers, from = "2022-01-01", to = Sys.Date(), get = "stock.prices")
+# Fix Date and Numeric Conversion
+data$Date <- as.Date(data[[1]], format = "%m/%d/%Y")  
 
-returns <- data %>%
-  group_by(symbol) %>%
-  tq_transmute(select = adjusted,
-               mutate_fun = dailyReturn,
-               col_rename = "daily_return") %>%
-  pivot_wider(names_from = symbol, values_from = daily_return) %>%
-  na.omit()
+# Split data
+prices <- as.matrix(sapply(data[, 2:11], as.numeric))
+rf_rates <- as.numeric(data[, 12])
 
-# Drop any columns with remaining NA values
-returns <- returns %>% select(where(~ sum(is.na(.)) == 0))
+# Calculate percentage changes (returns)
+asset_returns <- matrix(NA, nrow = nrow(prices) - 1, ncol = ncol(prices))
+colnames(asset_returns) <- colnames(prices)
 
-returns_matrix <- as.matrix(returns %>% select(-date))
+for (i in 1:ncol(prices)) {
+  asset_returns[, i] <- diff(prices[, i]) / prices[1:(nrow(prices)-1), i]
+}
 
-# Parameters
+# Get the RF returns for the same periods
+rf_returns <- rf_rates[-1] / 100
+
+# Calculate excess returns
+excess_returns <- asset_returns - rf_returns
+
+# Normality Check (Jarque-Bera Test)
+normality_pvalues <- apply(excess_returns, 2, function(x) jarque.bera.test(x)$p.value)
+
+# Report "Yes" or "No" based on a 0.05 significance level
+normality_status <- ifelse(normality_pvalues < 0.05, "No", "Yes")
+
+# Round skewness and kurtosis to 2 decimals
+skewness_vals_rounded <- round(skewness_vals, 2)
+kurtosis_vals_rounded <- round(kurtosis_vals, 2)
+
+# Create a summary table with rounded values
+normality_summary <- data.frame(
+  Asset = colnames(excess_returns),
+  JB_pvalue = round(normality_pvalues, 2),  # Rounded p-value to 2 decimals
+  Skewness = skewness_vals_rounded,  # Rounded skewness
+  Kurtosis = kurtosis_vals_rounded,  # Rounded kurtosis
+  `Normal?` = normality_status  # "Yes" or "No" for normality
+)
+
+# Print the summary table
+print(normality_summary)
+
+
+# Portfolio Optimization Settings
 lambda <- 3
 gamma <- 1
-delta_kurtosis <- 1
+delta <- 1
 gamma_power <- 3
 
-# Stats
-mean_returns <- colMeans(returns_matrix)
-cov_matrix <- cov(returns_matrix)
-skewness_values <- apply(returns_matrix, 2, skewness)
-kurtosis_values <- apply(returns_matrix, 2, kurtosis)
-n_assets <- ncol(returns_matrix)
+mean_returns <- colMeans(excess_returns)
+cov_matrix <- cov(excess_returns)
+skewness_vals <- apply(excess_returns, 2, skewness)
+kurtosis_vals <- apply(excess_returns, 2, kurtosis)
+n_assets <- ncol(excess_returns)
 
-### 1. 2-Moment Utility Portfolio (Mean-Variance Optimal)
+# 2-Moment Portfolio (Mean-Variance, no shorts)
 Dmat <- 2 * cov_matrix
 dvec <- mean_returns
 Amat <- cbind(rep(1, n_assets), diag(n_assets))
-bvec <- c(1, rep(0, n_assets))  # weights sum to 1, no short sales
+bvec <- c(1, rep(0, n_assets))
 
+# Without shorting
 opt_2 <- solve.QP(Dmat, dvec, Amat, bvec, meq = 1)
-weights_2 <- round(opt_2$solution, 4)
+weights_2 <- opt_2$solution
+cat("2-Moment Portfolio (No Shorts):\n")
+print(round(weights_2, 4))
 
-### 2. Power Utility under Lognormal
-utility_power_fn <- function(w, mu, sigma, gamma) {
-  port_mean <- as.numeric(t(w) %*% mu)
-  port_var <- as.numeric(t(w) %*% sigma %*% w)
-  - (port_mean / (1 - gamma) - (gamma / 2) * port_var)
+# With shorting
+Amat_short <- matrix(1, nrow = n_assets, ncol = 1)
+bvec_short <- 1
+opt_2_short <- solve.QP(Dmat, dvec, Amat_short, bvec_short, meq = 1)
+weights_2_short <- opt_2_short$solution
+cat("\n2-Moment Portfolio (With Shorts):\n")
+print(round(weights_2_short, 4))
+
+# Power Utility Portfolio (no shorts)
+power_utility_fn <- function(w) {
+  - (t(w) %*% mean_returns / (1 - gamma_power) - (gamma_power / 2) * t(w) %*% cov_matrix %*% w)
 }
-
+power_utility_grad <- function(w) {
+  - (mean_returns - gamma_power * cov_matrix %*% w)
+}
 opt_power <- nloptr(
   x0 = rep(1/n_assets, n_assets),
-  eval_f = function(w) utility_power_fn(w, mean_returns, cov_matrix, gamma_power),
-  eval_grad_f = function(w) nl.grad(w, function(w) utility_power_fn(w, mean_returns, cov_matrix, gamma_power)),
+  eval_f = power_utility_fn,
+  eval_grad_f = power_utility_grad,
   lb = rep(0, n_assets),
   ub = rep(1, n_assets),
   eval_g_eq = function(w) sum(w) - 1,
   eval_jac_g_eq = function(w) rep(1, n_assets),
-  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1.0e-8)
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1e-8)
 )
-weights_power <- round(opt_power$solution, 4)
+weights_power <- opt_power$solution
+cat("\nPower Utility Portfolio (No Shorts):\n")
+print(round(weights_power, 4))
 
-### 3. 3-Moment Utility (adds Skewness)
-utility_3_fn <- function(w, mu, sigma, skew, lambda, gamma) {
-  - (t(w) %*% mu - (lambda / 2) * t(w) %*% sigma %*% w + (gamma / 6) * sum((w^3) * skew))
+# With shorting
+opt_power_short <- nloptr(
+  x0 = rep(1/n_assets, n_assets),
+  eval_f = power_utility_fn,
+  eval_grad_f = power_utility_grad,
+  eval_g_eq = function(w) sum(w) - 1,
+  eval_jac_g_eq = function(w) rep(1, n_assets),
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1e-8)
+)
+weights_power_short <- opt_power_short$solution
+cat("\nPower Utility Portfolio (With Shorts):\n")
+print(round(weights_power_short, 4))
+
+# 3-Moment Portfolio (no shorts)
+three_moment_fn <- function(w) {
+  - (t(w) %*% mean_returns - (lambda/2) * t(w) %*% cov_matrix %*% w + (gamma/6) * sum((w^3) * skewness_vals))
 }
-
+three_moment_grad <- function(w) {
+  - (mean_returns - lambda * cov_matrix %*% w + (gamma/2) * (w^2) * skewness_vals)
+}
 opt_3 <- nloptr(
   x0 = rep(1/n_assets, n_assets),
-  eval_f = function(w) utility_3_fn(w, mean_returns, cov_matrix, skewness_values, lambda, gamma),
-  eval_grad_f = function(w) nl.grad(w, function(w) utility_3_fn(w, mean_returns, cov_matrix, skewness_values, lambda, gamma)),
+  eval_f = three_moment_fn,
+  eval_grad_f = three_moment_grad,
   lb = rep(0, n_assets),
   ub = rep(1, n_assets),
   eval_g_eq = function(w) sum(w) - 1,
   eval_jac_g_eq = function(w) rep(1, n_assets),
-  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1.0e-8)
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1e-8)
 )
-weights_3 <- round(opt_3$solution, 4)
+weights_3 <- opt_3$solution
+cat("\n3-Moment Portfolio (No Shorts):\n")
+print(round(weights_3, 4))
 
-### 4. 4-Moment Utility (adds Kurtosis)
-utility_4_fn <- function(w, mu, sigma, skew, kurt, lambda, gamma, delta) {
-  - (t(w) %*% mu - (lambda / 2) * t(w) %*% sigma %*% w +
-       (gamma / 6) * sum((w^3) * skew) -
-       (delta / 24) * sum((w^4) * kurt))
+# With shorting
+opt_3_short <- nloptr(
+  x0 = rep(1/n_assets, n_assets),
+  eval_f = three_moment_fn,
+  eval_grad_f = three_moment_grad,
+  eval_g_eq = function(w) sum(w) - 1,
+  eval_jac_g_eq = function(w) rep(1, n_assets),
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1e-8)
+)
+weights_3_short <- opt_3_short$solution
+cat("\n3-Moment Portfolio (With Shorts):\n")
+print(round(weights_3_short, 4))
+
+# 4-Moment Portfolio (no shorts)
+four_moment_fn <- function(w) {
+  - (t(w) %*% mean_returns - (lambda/2) * t(w) %*% cov_matrix %*% w +
+       (gamma/6) * sum((w^3) * skewness_vals) - (delta/24) * sum((w^4) * kurtosis_vals))
 }
-
+four_moment_grad <- function(w) {
+  - (mean_returns - lambda * cov_matrix %*% w + 
+       (gamma/2) * (w^2) * skewness_vals - (delta/6) * (w^3) * kurtosis_vals)
+}
 opt_4 <- nloptr(
   x0 = rep(1/n_assets, n_assets),
-  eval_f = function(w) utility_4_fn(w, mean_returns, cov_matrix, skewness_values, kurtosis_values, lambda, gamma, delta_kurtosis),
-  eval_grad_f = function(w) nl.grad(w, function(w) utility_4_fn(w, mean_returns, cov_matrix, skewness_values, kurtosis_values, lambda, gamma, delta_kurtosis)),
+  eval_f = four_moment_fn,
+  eval_grad_f = four_moment_grad,
   lb = rep(0, n_assets),
   ub = rep(1, n_assets),
   eval_g_eq = function(w) sum(w) - 1,
   eval_jac_g_eq = function(w) rep(1, n_assets),
-  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1.0e-8)
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1e-8)
 )
-weights_4 <- round(opt_4$solution, 4)
+weights_4 <- opt_4$solution
+cat("\n4-Moment Portfolio (No Shorts):\n")
+print(round(weights_4, 4))
 
-### Compare
-comparison_df <- data.frame(
-  Asset = colnames(returns_matrix),
-  `2-Moment` = weights_2,
-  `Power Utility` = weights_power,
-  `3-Moment` = weights_3,
-  `4-Moment` = weights_4
+# With shorting
+opt_4_short <- nloptr(
+  x0 = rep(1/n_assets, n_assets),
+  eval_f = four_moment_fn,
+  eval_grad_f = four_moment_grad,
+  eval_g_eq = function(w) sum(w) - 1,
+  eval_jac_g_eq = function(w) rep(1, n_assets),
+  opts = list(algorithm = "NLOPT_LD_SLSQP", xtol_rel = 1e-8)
 )
+weights_4_short <- opt_4_short$solution
+cat("\n4-Moment Portfolio (With Shorts):\n")
+print(round(weights_4_short, 4))
 
-print(comparison_df)
+# Combine weights
+weights_df <- data.frame(
+  Asset = colnames(excess_returns),
+  `2-Moment` = round(weights_2, 4),
+  `Power Utility` = round(weights_power, 4),
+  `3-Moment` = round(weights_3, 4),
+  `4-Moment` = round(weights_4, 4),
+  `2-Moment (Shorts)` = round(weights_2_short, 4),
+  `Power Utility (Shorts)` = round(weights_power_short, 4),
+  `3-Moment (Shorts)` = round(weights_3_short, 4),
+  `4-Moment (Shorts)` = round(weights_4_short, 4)
+)
+print(weights_df)
 
-### Plot Comparison
-comparison_long <- pivot_longer(comparison_df, cols = -Asset, names_to = "Model", values_to = "Weight")
+# Calculate CE
+calculate_CE <- function(w, mean_ret, cov_mat, skew, kurt, model = "2") {
+  port_mean <- as.numeric(t(w) %*% mean_ret)
+  port_var <- as.numeric(t(w) %*% cov_mat %*% w)
+  port_skew <- sum((w^3) * skew)
+  port_kurt <- sum((w^4) * kurt)
+  
+  if (model == "2") {
+    return(port_mean - (lambda/2) * port_var)
+  } else if (model == "power") {
+    return(port_mean / (1 - gamma_power) - (gamma_power/2) * port_var)
+  } else if (model == "3") {
+    return(port_mean - (lambda/2) * port_var + (gamma/6) * port_skew)
+  } else if (model == "4") {
+    return(port_mean - (lambda/2) * port_var + (gamma/6) * port_skew - (delta/24) * port_kurt)
+  }
+}
 
-ggplot(comparison_long, aes(x = Asset, y = Weight, fill = Model)) +
+CE_values <- data.frame(
+  Model = c("2-Moment", "Power Utility", "3-Moment", "4-Moment"),
+  CE = c(
+    calculate_CE(weights_2, mean_returns, cov_matrix, skewness_vals, kurtosis_vals, "2"),
+    calculate_CE(weights_power, mean_returns, cov_matrix, skewness_vals, kurtosis_vals, "power"),
+    calculate_CE(weights_3, mean_returns, cov_matrix, skewness_vals, kurtosis_vals, "3"),
+    calculate_CE(weights_4, mean_returns, cov_matrix, skewness_vals, kurtosis_vals, "4")
+  )
+)
+print(CE_values)
+
+### Plots
+
+# Plot Skewness and Kurtosis
+sk_kurt <- data.frame(
+  Asset = names(skewness_vals),
+  Skewness = skewness_vals,
+  Kurtosis = kurtosis_vals
+)
+sk_kurt_melted <- melt(sk_kurt, id.vars = "Asset")
+
+ggplot(sk_kurt_melted, aes(x = Asset, y = value, fill = variable)) +
   geom_bar(stat = "identity", position = "dodge") +
-  labs(title = "Portfolio Weights Across Utility Models") +
-  theme_minimal() +
+  labs(title = "Asset Skewness and Kurtosis", y = "Value") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-weight_change_df <- data.frame(
-  Asset = colnames(returns_matrix),
-  Skewness = round(skewness_values, 3),
-  `Δ3-Moment vs 2-Moment` = weights_3 - weights_2,
-  `Δ4-Moment vs 2-Moment` = weights_4 - weights_2
-)
+# Plot Weights Across Models
+weights_melted <- melt(weights_df, id.vars = "Asset")
+ggplot(weights_melted, aes(x = Asset, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Portfolio Weights: Different Utility Models", y = "Weight") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-# Convert to long format for plotting
-weight_change_long <- pivot_longer(
-  weight_change_df,
-  cols = starts_with("Δ"),
-  names_to = "Model_Comparison",
-  values_to = "Weight_Change"
-)
-
-# Plot Skewness vs. Change in Weight
-ggplot(weight_change_long, aes(x = Skewness, y = Weight_Change, label = Asset)) +
-  geom_point(aes(color = Model_Comparison), size = 3) +
-  geom_text(vjust = -0.8, size = 3) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
-  labs(title = "Impact of Skewness on Portfolio Weights",
-       subtitle = "Change in Allocation vs. 2-Moment Model",
-       x = "Skewness of Asset",
-       y = "Change in Weight",
-       color = "Model Comparison") +
+# Plot CE Comparison
+ggplot(CE_values, aes(x = Model, y = CE, fill = Model)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Certainty Equivalent Across Models", y = "Certainty Equivalent") +
   theme_minimal()
