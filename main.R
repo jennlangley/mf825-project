@@ -148,11 +148,11 @@ portfolio_stats <- function(w) {
   mean_ret <- sum(w * mean_returns)
   var_ret <- portfolio_variance(w, cov_matrix)
   data.frame(
-    Mean = mean_ret * 100,
-    StdDev = sqrt(var_ret) * 100,
-    Sharpe = mean_ret / sqrt(var_ret),
-    Skewness = portfolio_coskewness(w, S_tensor),
-    Kurtosis = portfolio_cokurtosis(w, K_tensor)
+    Mean = round(mean_ret * 100, 2),
+    StdDev = round(sqrt(var_ret) * 100, 2),
+    Sharpe = round(mean_ret / sqrt(var_ret), 2),
+    Skewness = round(portfolio_coskewness(w, S_tensor), 6),
+    Kurtosis = round(portfolio_cokurtosis(w, K_tensor), 6)
   )
 }
 
@@ -167,10 +167,10 @@ CE <- diag(utility_table)  # Certainty equivalent under own model
 
 utility_comparison <- data.frame(
   Portfolio = names(expected_utility),
-  MV_Utility = utility_table[1, ],
-  MVS_Utility = utility_table[2, ],
-  MVSK_Utility = utility_table[3, ],
-  CertaintyEquivalent = CE
+  MV_Utility = round(utility_table[1, ], 3),
+  MVS_Utility = round(utility_table[2, ], 3),
+  MVSK_Utility = round(utility_table[3, ], 3),
+  CertaintyEquivalent = round(CE, 3)
 )
 print("Expected Utility and Certainty Equivalent:")
 print(utility_comparison)
@@ -220,7 +220,7 @@ bp2 <- barplot(
 )
 text(
   x = bp2,
-  y = stats_compare$Skewness,
+  y = round(stats_compare$Skewness, 4),
   labels = signif(stats_compare$Skewness, 4),
   pos = 3, cex = 1, offset = 0.2
 )
@@ -234,7 +234,7 @@ bp3 <- barplot(
 )
 text(
   x = bp3,
-  y = stats_compare$Kurtosis,
+  y = round(stats_compare$Kurtosis,4),
   labels = signif(stats_compare$Kurtosis, 2),
   pos = 3, cex = 1, offset = 0.2
 )
