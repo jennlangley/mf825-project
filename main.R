@@ -32,42 +32,43 @@ cov_matrix <- cov(excess_returns, use = "pairwise.complete.obs")
 skewness_vals <- apply(excess_returns, 2, skewness, na.rm = TRUE)
 kurtosis_vals <- apply(excess_returns, 2, kurtosis, na.rm = TRUE)
 
+# Calculate Sharpe ratios for individual assets
+sharpe_ratios <- mean_returns / sqrt(diag(cov_matrix))
+
 # Compile asset statistics in a data frame
 asset_stats <- data.frame(
   Asset = colnames(excess_returns),
   Mean = mean_returns,
   Variance = diag(cov_matrix),
   StdDev = sqrt(diag(cov_matrix)),
+  Sharpe = sharpe_ratios,
   Skewness = skewness_vals,
   Kurtosis = kurtosis_vals
 )
 
-# Display statistics sorted by mean return
+# Display statistics sorted by Mean return
 print("Individual Asset Statistics (Ordered by Mean Descending):")
 print(asset_stats[order(-asset_stats$Mean), ])
 
-# --- Test for normality ---
-normality_pvalues <- apply(excess_returns, 2, function(x) jarque.bera.test(x)$p.value)
+# --- Test for normality (Shapiro-Wilk only) ---
 shapiro_pvalues <- apply(excess_returns, 2, function(x) shapiro.test(x)$p.value)
 
 # Compile normality test results
 normality_summary <- data.frame(
   Asset = colnames(excess_returns),
-  JB_pvalue = round(normality_pvalues, 4),
   Shapiro_pvalue = round(shapiro_pvalues, 4),
   Skewness = round(skewness_vals, 3),
   Kurtosis = round(kurtosis_vals, 3),
-  JB_Normal = ifelse(normality_pvalues < 0.05, "No", "Yes"),
-  Shapiro_Normal = ifelse(shapiro_pvalues < 0.05, "No", "Yes")
+  Normal = ifelse(shapiro_pvalues < 0.05, "No", "Yes")
 )
-print("Normality Summary:")
+print("Normality Summary (Shapiro-Wilk Test):")
 print(normality_summary)
 
 # --- Set optimization parameters ---
 # Risk aversion, skewness preference, and kurtosis aversion parameters
-lambda <- 0.5  # Risk aversion for variance 
-gamma <- 0.5   # Skewness preference
-delta <- 0.5   # Kurtosis aversion
+lambda <- 1.0   # Risk aversion for variance (moderate)
+gamma <- 2.0   # Skewness preference (strong)
+delta <- 0.5    # Kurtosis aversion (low)
 n_assets <- ncol(excess_returns)
 n_obs <- nrow(excess_returns)
 
@@ -145,17 +146,24 @@ portfolio_cokurtosis <- function(w, K) {
   return(val)
 }
 
+# Function to calculate Sharpe ratio
+portfolio_sharpe <- function(w) {
+  return(sum(w * mean_returns) / sqrt(portfolio_variance(w, cov_matrix)))
+}
+
 # Function to compile portfolio statistics
 portfolio_stats <- function(weights) {
   mean_ret <- sum(weights * mean_returns)
   var_ret <- portfolio_variance(weights, cov_matrix)
   skew_ret <- portfolio_coskewness(weights, S_tensor)
   kurt_ret <- portfolio_cokurtosis(weights, K_tensor)
+  sharpe_ret <- mean_ret / sqrt(var_ret)
   
   data.frame(
     Mean = mean_ret,
     Variance = var_ret,
     StdDev = sqrt(var_ret),
+    Sharpe = sharpe_ret,
     Skewness = skew_ret,
     Kurtosis = kurt_ret
   )
@@ -266,9 +274,9 @@ weights_4_unconstrained <- weights_4_unconstrained / sum(weights_4_unconstrained
 # Portfolio weights table
 weights_df_unconstrained <- data.frame(
   Asset = colnames(excess_returns),
-  `2-Moment (MV)` = round(weights_2_unconstrained, 4),
-  `3-Moment (MVS)` = round(weights_3_unconstrained, 4),
-  `4-Moment (MVSK)` = round(weights_4_unconstrained, 4),
+  `2-Moment` = round(weights_2_unconstrained, 4),
+  `3-Moment` = round(weights_3_unconstrained, 4),
+  `4-Moment` = round(weights_4_unconstrained, 4),
   check.names = FALSE
 )
 print("Optimal Unconstrained Weights:")
@@ -280,20 +288,72 @@ stats_3_unconstrained <- portfolio_stats(weights_3_unconstrained)
 stats_4_unconstrained <- portfolio_stats(weights_4_unconstrained)
 
 stats_compare_unconstrained <- rbind(stats_2_unconstrained, stats_3_unconstrained, stats_4_unconstrained)
-stats_compare_unconstrained$Model <- c("2-Moment (MV)", "3-Moment (MVS)", "4-Moment (MVSK)")
+stats_compare_unconstrained$Model <- c("2-Moment", "3-Moment", "4-Moment")
 print("Portfolio Characteristics Comparison (Unconstrained):")
 print(stats_compare_unconstrained)
 
-# Calculate certainty equivalents (expected utility)
-ce_2_unconstrained <- expected_utility_2moment(weights_2_unconstrained)
-ce_3_unconstrained <- expected_utility_3moment(weights_3_unconstrained)
-ce_4_unconstrained <- expected_utility_4moment(weights_4_unconstrained)
+# --- Calculate expected utility and certainty equivalents ---
+# For 2-moment (MV) portfolio
+mv_mean <- sum(weights_2_unconstrained * mean_returns)
+mv_variance <- portfolio_variance(weights_2_unconstrained, cov_matrix)
+mv_skewness <- portfolio_coskewness(weights_2_unconstrained, S_tensor)
+mv_kurtosis <- portfolio_cokurtosis(weights_2_unconstrained, K_tensor)
+mv_sharpe <- mv_mean / sqrt(mv_variance)
 
-ce_df_unconstrained <- data.frame(
-  Model = c("2-Moment (MV)", "3-Moment (MVS)", "4-Moment (MVSK)"),
-  CertaintyEquivalent = c(ce_2_unconstrained, ce_3_unconstrained, ce_4_unconstrained)
+# Calculate utility under different models
+mv_utility_2m <- expected_utility_2moment(weights_2_unconstrained)
+mv_utility_3m <- expected_utility_3moment(weights_2_unconstrained)
+mv_utility_4m <- expected_utility_4moment(weights_2_unconstrained)
+
+# For 3-moment portfolio
+mvs_mean <- sum(weights_3_unconstrained * mean_returns)
+mvs_variance <- portfolio_variance(weights_3_unconstrained, cov_matrix)
+mvs_skewness <- portfolio_coskewness(weights_3_unconstrained, S_tensor)
+mvs_kurtosis <- portfolio_cokurtosis(weights_3_unconstrained, K_tensor)
+mvs_sharpe <- mvs_mean / sqrt(mvs_variance)
+
+# Calculate utility under different models
+mvs_utility_2m <- expected_utility_2moment(weights_3_unconstrained)
+mvs_utility_3m <- expected_utility_3moment(weights_3_unconstrained)
+mvs_utility_4m <- expected_utility_4moment(weights_3_unconstrained)
+
+# For 4-moment portfolio
+mvsk_mean <- sum(weights_4_unconstrained * mean_returns)
+mvsk_variance <- portfolio_variance(weights_4_unconstrained, cov_matrix)
+mvsk_skewness <- portfolio_coskewness(weights_4_unconstrained, S_tensor)
+mvsk_kurtosis <- portfolio_cokurtosis(weights_4_unconstrained, K_tensor)
+mvsk_sharpe <- mvsk_mean / sqrt(mvsk_variance)
+
+# Calculate utility under different models
+mvsk_utility_2m <- expected_utility_2moment(weights_4_unconstrained)
+mvsk_utility_3m <- expected_utility_3moment(weights_4_unconstrained)
+mvsk_utility_4m <- expected_utility_4moment(weights_4_unconstrained)
+
+# Compile comprehensive utility comparison
+utility_comparison <- data.frame(
+  Portfolio = c("2-Moment", "3-Moment", "4-Moment"),
+  Mean = c(mv_mean, mvs_mean, mvsk_mean),
+  Variance = c(mv_variance, mvs_variance, mvsk_variance),
+  Sharpe = c(mv_sharpe, mvs_sharpe, mvsk_sharpe),
+  `2M_Utility` = c(mv_utility_2m, mvs_utility_2m, mvsk_utility_2m),
+  `3M_Utility` = c(mv_utility_3m, mvs_utility_3m, mvsk_utility_3m),
+  `4M_Utility` = c(mv_utility_4m, mvs_utility_4m, mvsk_utility_4m)
 )
-print("Certainty Equivalent Comparison (Unconstrained):")
+
+print("Comprehensive Utility Comparison:")
+print(utility_comparison)
+
+# Display a more focused expected utility table
+ce_df_unconstrained <- data.frame(
+  Model = c("2-Moment", "3-Moment", "4-Moment"),
+  Sharpe = round(c(mv_sharpe, mvs_sharpe, mvsk_sharpe), 4),
+  MV_Utility = round(c(mv_utility_2m, mvs_utility_2m, mvsk_utility_2m), 6),
+  MVS_Utility = round(c(mv_utility_3m, mvs_utility_3m, mvsk_utility_3m), 6),
+  MVSK_Utility = round(c(mv_utility_4m, mvs_utility_4m, mvsk_utility_4m), 6),
+  CertaintyEquivalent = round(c(mv_utility_2m, mvs_utility_3m, mvsk_utility_4m), 6),
+  check.names = FALSE
+)
+print("Expected Utility and Certainty Equivalent Comparison:")
 print(ce_df_unconstrained)
 
 # --- Create visualizations ---
@@ -327,29 +387,68 @@ plot_weights <- ggplot(weights_long, aes(x = Asset, y = Weight, fill = Model)) +
 print(plot_weights)
 ggsave("./plots/portfolio_weights_comparison.png", plot_weights, width = 10, height = 6)
 
-# 2. Expected utility comparison
-plot_utility <- ggplot(ce_df_unconstrained, aes(x = reorder(Model, CertaintyEquivalent), 
-                                                y = CertaintyEquivalent, fill = Model)) +
+# 2. Expected utility comparison across all models
+ce_long <- ce_df_unconstrained %>%
+  tidyr::pivot_longer(cols = c(MV_Utility, MVS_Utility, MVSK_Utility), 
+                      names_to = "UtilityType", values_to = "Utility")
+
+plot_utility <- ggplot(ce_long, aes(x = Model, y = Utility, fill = UtilityType)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  labs(
+    title = "Expected Utility Comparison",
+    subtitle = "Portfolio performance under different utility specifications",
+    y = "Expected Utility", x = ""
+  ) +
+  scale_fill_brewer(palette = "Set2", 
+                    labels = c("Mean-Variance", "Mean-Variance-Skewness", "Mean-Variance-Skewness-Kurtosis")) +
+  my_theme
+
+print(plot_utility)
+ggsave("./plots/expected_utility_comparison_all.png", plot_utility, width = 10, height = 6)
+
+# 3. Certainty equivalent comparison
+plot_ce <- ggplot(ce_df_unconstrained, aes(x = reorder(Model, CertaintyEquivalent), 
+                                           y = CertaintyEquivalent, fill = Model)) +
   geom_bar(stat = "identity", width = 0.6) +
-  geom_text(aes(label = sprintf("%.5f", CertaintyEquivalent)), 
+  geom_text(aes(label = sprintf("%.6f", CertaintyEquivalent)), 
             position = position_stack(vjust = 0.5),
             color = "white", fontface = "bold") +
   labs(
-    title = "Expected Utility Comparison",
+    title = "Certainty Equivalent Comparison",
     subtitle = "Higher values indicate better performance given investor preferences",
-    y = "Expected Utility", x = ""
+    y = "Certainty Equivalent", x = ""
   ) +
   scale_fill_brewer(palette = "Set1") +
   my_theme +
   theme(legend.position = "none") +
   coord_flip()
 
-print(plot_utility)
-ggsave("./plots/expected_utility_comparison.png", plot_utility, width = 9, height = 5)
+print(plot_ce)
+ggsave("./plots/certainty_equivalent_comparison.png", plot_ce, width = 9, height = 5)
 
-# 3. Portfolio characteristics comparison
+# 4. Sharpe ratio comparison
+plot_sharpe <- ggplot(ce_df_unconstrained, aes(x = reorder(Model, Sharpe), 
+                                               y = Sharpe, fill = Model)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_text(aes(label = sprintf("%.4f", Sharpe)), 
+            position = position_stack(vjust = 0.5),
+            color = "white", fontface = "bold") +
+  labs(
+    title = "Sharpe Ratio Comparison",
+    subtitle = "Risk-adjusted return across different portfolio models",
+    y = "Sharpe Ratio", x = ""
+  ) +
+  scale_fill_brewer(palette = "Set1") +
+  my_theme +
+  theme(legend.position = "none") +
+  coord_flip()
+
+print(plot_sharpe)
+ggsave("./plots/sharpe_ratio_comparison.png", plot_sharpe, width = 9, height = 5)
+
+# 5. Portfolio characteristics comparison
 stats_long <- stats_compare_unconstrained %>%
-  tidyr::pivot_longer(cols = c(Mean, Variance, Skewness, Kurtosis), 
+  tidyr::pivot_longer(cols = c(Mean, Variance, Sharpe, Skewness, Kurtosis), 
                       names_to = "Statistic", values_to = "Value")
 
 plot_stats <- ggplot(stats_long, aes(x = Statistic, y = Value, fill = Model)) +
@@ -366,24 +465,3 @@ plot_stats <- ggplot(stats_long, aes(x = Statistic, y = Value, fill = Model)) +
 
 print(plot_stats)
 ggsave("./plots/portfolio_characteristics.png", plot_stats, width = 10, height = 6)
-
-# 4. Normality test results
-normality_long <- normality_summary %>%
-  tidyr::pivot_longer(cols = c(JB_pvalue, Shapiro_pvalue), 
-                      names_to = "Test", values_to = "p_value")
-
-plot_normality <- ggplot(normality_long, aes(x = Asset, y = p_value, fill = Test)) +
-  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
-  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red") +
-  annotate("text", x = 1, y = 0.06, label = "p = 0.05", hjust = 0, color = "red") +
-  labs(
-    title = "Normality Test Results",
-    subtitle = "p-value < 0.05 indicates non-normal returns",
-    y = "p-value", x = ""
-  ) +
-  scale_fill_brewer(palette = "Set2") +
-  my_theme +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-print(plot_normality)
-ggsave("./plots/normality_tests.png", plot_normality, width = 10, height = 6)
