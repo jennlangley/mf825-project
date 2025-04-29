@@ -47,7 +47,6 @@ shapiro_p <- apply(asset_returns, 2, function(x) shapiro.test(x)$p.value)
 asset_stats$Shapiro_p <- round(shapiro_p, 4)
 asset_stats$Normal   <- ifelse(shapiro_p < 0.05, "No", "Yes")
 
-
 print("Individual Asset Statistics:") # ordered by Mean Desc
 print(asset_stats[order(-asset_stats$Mean), ])
 
@@ -79,7 +78,6 @@ for(i in seq_len(ncol(asset_returns))) {
 # restore plotting parameters
 par(oldpar)
 
-
 # Coskewness and cokurtosis tensors
 coskewness_tensor <- function(R) {
   N <- ncol(R); S <- array(0, dim = c(N, N, N))
@@ -108,10 +106,8 @@ lambda <- 1.0 # standard risk aversion
 gamma <- 2.0 # rewards neg skew
 delta <- 0.5 # rewards kurtosis
 
-
 cat("Asset with highest Sharpe ratio:\n")
 print(asset_stats[which.max(asset_stats$Sharpe),])
-
 
 expected_utility <- list(
   "2-Moment" = function(w) sum(w * mean_returns) - (lambda/2) * portfolio_variance(w, cov_matrix),
@@ -240,7 +236,6 @@ text(
   labels = signif(utility_comparison$CertaintyEquivalent, 4),
   pos = 3, cex = 1, offset = 0.2
 )
-
 
 # Convert to matrix for barplot
 weights_matrix <- t(as.matrix(weights_df[, -1]))
