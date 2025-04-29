@@ -103,10 +103,15 @@ portfolio_variance <- function(w, Sigma) as.numeric(t(w) %*% Sigma %*% w)
 portfolio_coskewness <- function(w, S) sum(outer(outer(w, w), w) * S)
 portfolio_cokurtosis <- function(w, K) sum(outer(outer(outer(w, w), w), w) * K)
 
-# Utility setup
-lambda <- 1.0 # risk aversion
-gamma <- 2.0 # skewness preference
-delta <- 0.5 # kurtosis aversion
+############## Utility setup parameters ##################
+lambda <- 1.0 # standard risk aversion
+gamma <- 2.0 # rewards neg skew
+delta <- 0.5 # rewards kurtosis
+
+
+cat("Asset with highest Sharpe ratio:\n")
+print(asset_stats[which.max(asset_stats$Sharpe),])
+
 
 expected_utility <- list(
   "2-Moment" = function(w) sum(w * mean_returns) - (lambda/2) * portfolio_variance(w, cov_matrix),
@@ -178,23 +183,6 @@ print(utility_comparison)
 model_colors <- c("steelblue", "forestgreen", "firebrick")
 model_names <- c("2-Moment", "3-Moment", "4-Moment")
 
-# Convert to matrix for barplot
-weights_matrix <- t(as.matrix(weights_df[, -1]))
-colnames(weights_matrix) <- weights_df$Asset
-
-# grouped barplot
-barplot(
-  weights_matrix,
-  beside = TRUE,
-  col = model_colors,
-  ylim = c(0, 1),
-  ylab = "Portfolio Weight",
-  main = "Optimal Portfolio Allocations by Moment Model",
-  las = 2,
-  cex.names = 0.9
-)
-legend("topright", legend = model_names, fill = model_colors, bty = "n")
-
 # Sharpe Ratio
 bp1 <- barplot(
   stats_compare$Sharpe,
@@ -238,13 +226,13 @@ text(
   labels = signif(stats_compare$Kurtosis, 2),
   pos = 3, cex = 1, offset = 0.2
 )
-# Certainty Equivalent
+# Utility / Certainty Equivalent 
 bp4 <- barplot(
   utility_comparison$CertaintyEquivalent,
   names.arg = utility_comparison$Portfolio,
   col = model_colors,
-  ylab = "Certainty Equivalent",
-  main = "Certainty Equivalent by Model"
+  ylab = "Utility",
+  main = "Utility by Model"
 )
 text(
   x = bp4,
@@ -252,3 +240,21 @@ text(
   labels = signif(utility_comparison$CertaintyEquivalent, 4),
   pos = 3, cex = 1, offset = 0.2
 )
+
+
+# Convert to matrix for barplot
+weights_matrix <- t(as.matrix(weights_df[, -1]))
+colnames(weights_matrix) <- weights_df$Asset
+
+# grouped barplot
+barplot(
+  weights_matrix,
+  beside = TRUE,
+  col = model_colors,
+  ylim = c(0, 1),
+  ylab = "Portfolio Weight",
+  main = "Optimal Portfolio Allocations by Moment Model",
+  las = 2,
+  cex.names = 0.9
+)
+legend("topright", legend = model_names, fill = model_colors, bty = "n")
